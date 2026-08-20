@@ -259,7 +259,7 @@ if uploaded_file is not None:
         
         image = Image.open(uploaded_file)
         st.markdown('<div class="image-preview-container">', unsafe_allow_html=True)
-        st.image(image, use_column_width=True)
+        st.image(image, width="stretch")
         st.markdown('</div>', unsafe_allow_html=True)
         
         # Image info
