@@ -12,7 +12,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # 2. Define Model Path and Target Classes
 # Downloads model.pt from Hugging Face Hub (cached locally after first run)
 HF_REPO_ID = "De-FavouredOne/Skin-Disease-Diagnosis-Model"  
-HF_FILENAME = "model.pt.zip"
+HF_FILENAME = "model.pt"
 
 DOWNLOAD_ERROR = None  # app.py can check this if MODEL_PATH is None
 
