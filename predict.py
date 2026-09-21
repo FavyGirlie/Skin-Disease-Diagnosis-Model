@@ -29,7 +29,8 @@ CLASS_NAMES = [
     'Eczema',
     'Fungal',
     'Others',
-    'Scabies'
+    'Scabies',
+    'Dermatitis'
 ]
 
 # 3. Model Architecture
