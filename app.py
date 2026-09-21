@@ -1,23 +1,36 @@
-import os
-import tempfile
-from pathlib import Path
+import traceback
 
 import streamlit as st
-import predict
-from predict import load_model, predict_image, MODEL_PATH, CLASS_NAMES
-from PIL import Image
+from PIL import Image, ImageOps
 
-BASE_DIR = Path(__file__).resolve().parent
-TEMP_DIR = BASE_DIR / "temp_uploads"
-TEMP_DIR.mkdir(exist_ok=True)
+from predict import CLASS_NAMES, get_model_path, load_model, predict_image
 
 # ==================== PAGE CONFIG ====================
 st.set_page_config(
     page_title="Skin Disease Diagnosis",
     page_icon="🏥",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
+
+
+def render_html(markup: str) -> None:
+    """Render HTML through st.markdown.
+
+    Lines are stripped and joined so Markdown never treats indented HTML as a
+    code block and blank lines never split a block in two.
+    """
+    flat = "".join(line.strip() for line in markup.splitlines())
+    st.markdown(flat, unsafe_allow_html=True)
+
+
+def show_image(img: Image.Image) -> None:
+    # Newer Streamlit uses width="stretch"; older versions use use_container_width.
+    try:
+        st.image(img, width="stretch")
+    except Exception:
+        st.image(img, use_container_width=True)
+
 
 # ==================== CUSTOM STYLING ====================
 st.markdown("""
@@ -25,6 +38,9 @@ st.markdown("""
     .stApp {
         background: linear-gradient(135deg, #f4f8ff 0%, #eef4ff 100%);
         color: #163b63;
+    }
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #ecf4ff 0%, #f8fbff 100%);
     }
     .block-container {
         padding-top: 1rem;
@@ -42,6 +58,7 @@ st.markdown("""
     .hero-card h2 {
         margin: 0 0 0.3rem 0;
         font-size: 1.7rem;
+        color: white;
     }
     .hero-card p {
         margin: 0;
@@ -56,20 +73,10 @@ st.markdown("""
         box-shadow: 0 4px 14px rgba(10, 48, 102, 0.06);
         margin-bottom: 0.9rem;
     }
-    .section-card h3, .section-card h2 {
+    .section-card h3 {
         margin-top: 0;
         margin-bottom: 0.5rem;
         color: #1b4a7b;
-    }
-    .sidebar .sidebar-content {
-        background: linear-gradient(180deg, #ecf4ff 0%, #f8fbff 100%);
-    }
-    .upload-card {
-        background: linear-gradient(180deg, #f8fbff 0%, #edf5ff 100%);
-        border: 2px dashed #67a8ff;
-        border-radius: 16px;
-        padding: 1rem;
-        text-align: center;
     }
     .class-list {
         display: flex;
@@ -91,7 +98,6 @@ st.markdown("""
         border-radius: 16px;
         padding: 0.6rem;
         border: 1px solid #e0eaf8;
-        box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.03);
     }
     .result-box {
         background: linear-gradient(135deg, #f1fbf4 0%, #f8fff9 100%);
@@ -99,6 +105,7 @@ st.markdown("""
         border-radius: 16px;
         padding: 1rem 1.1rem;
         margin-top: 0.7rem;
+        margin-bottom: 0.9rem;
     }
     .result-title {
         font-size: 1.1rem;
@@ -115,6 +122,18 @@ st.markdown("""
     .confidence-score {
         font-size: 1rem;
         color: #294c6b;
+    }
+    .confidence-bar {
+        background: #dbe7f5;
+        border-radius: 999px;
+        height: 10px;
+        margin-top: 0.5rem;
+        overflow: hidden;
+    }
+    .confidence-fill {
+        background: linear-gradient(90deg, #2d72d8 0%, #2f9e44 100%);
+        height: 100%;
+        border-radius: 999px;
     }
     .metric-card {
         background: white;
@@ -137,10 +156,11 @@ st.markdown("""
         font-weight: 700;
         color: #133d6e;
     }
-    .alert-success, .alert-warning, .alert-error {
+    .alert-success, .alert-warning {
         border-radius: 14px;
         padding: 0.8rem 1rem;
         margin-top: 0.6rem;
+        margin-bottom: 0.6rem;
         font-size: 0.95rem;
     }
     .alert-success {
@@ -153,10 +173,14 @@ st.markdown("""
         color: #8a5a00;
         border: 1px solid #f3d08f;
     }
-    .alert-error {
-        background: #fff0f0;
-        color: #a12e2e;
-        border: 1px solid #f1b5b5;
+    .result-disclaimer {
+        padding: 0.7rem 1rem;
+        border-radius: 12px;
+        background: #f7faff;
+        border: 1px solid #e0eaf8;
+        color: #55657a;
+        font-size: 0.9rem;
+        margin-bottom: 0.9rem;
     }
     .medical-footer {
         text-align: center;
@@ -175,255 +199,204 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
 # ==================== LOAD MODEL ====================
-@st.cache_resource
+# Exceptions are not cached by st.cache_resource, so a failed load is retried on
+# the next run instead of being stored as a permanent None.
+@st.cache_resource(show_spinner="Loading model...")
 def get_model():
-    if MODEL_PATH is None:
-        return None
-    return load_model(MODEL_PATH)
+    path = get_model_path()
+    return load_model(path)
 
-model = get_model()
 
-if model is None:
-    if MODEL_PATH is None:
-        st.error(f"❌ Could not download model from Hugging Face Hub.\n\n**Details:** {predict.DOWNLOAD_ERROR}")
-    else:
-        st.error(f"❌ Model file downloaded but failed to load.\n\n**Details:** {predict.LAST_LOAD_ERROR}")
+try:
+    model = get_model()
+except Exception as e:
+    st.error(f"❌ Model could not be loaded.\n\n**{type(e).__name__}:** {e}")
+    with st.expander("Technical details"):
+        st.code(traceback.format_exc())
     st.stop()
 
+
 # ==================== HEADER ====================
-st.markdown("""
+render_html("""
 <div class="hero-card">
     <h2>🏥 Skin Disease Diagnosis</h2>
-    <p>Advanced dermatological screening powered by AI and the PASSION dataset.</p>
+    <p>AI-assisted dermatological screening trained on the PASSION dataset.</p>
 </div>
-""", unsafe_allow_html=True)
+""")
 
 # ==================== SIDEBAR ====================
 with st.sidebar:
     st.subheader("System information")
-    st.write(f"Model state: active")
+    st.write("Model state: active")
     st.write(f"Dataset classes: {len(CLASS_NAMES)}")
-    st.write("Model specs: 224×224, PyTorch, ImageNet normalization")
+    st.write("Model specs: ResNet50, 224×224 input, PyTorch, ImageNet normalization")
     st.divider()
     st.subheader("Detected classes")
     for cls in CLASS_NAMES:
         st.write(f"• {cls}")
     st.divider()
     st.subheader("Instructions")
-    st.write("1. Upload a clear image")
+    st.write("1. Upload a clear, well-lit image")
     st.write("2. Wait for analysis")
     st.write("3. Review the result")
     st.write("4. Consult a professional")
+
 
 # ==================== MAIN CONTENT ====================
 col1, col2 = st.columns([1, 1], gap="large")
 
 with col1:
-    st.markdown("""
-        <div class="section-card">
-            <h3>📤 Upload medical image</h3>
-            <p style="margin:0; color:#576b84;">Upload a clear image of a skin lesion for preliminary analysis.</p>
-        </div>
-    """, unsafe_allow_html=True)
+    render_html("""
+    <div class="section-card">
+        <h3>📤 Upload skin image</h3>
+        <p style="margin:0; color:#576b84;">Upload a clear image of a skin lesion for preliminary screening.</p>
+    </div>
+    """)
     uploaded_file = st.file_uploader(
         "Select a dermatological image",
         type=["jpg", "jpeg", "png", "gif"],
-        help="Upload clear images of skin lesions for accurate diagnosis",
+        help="Clear, well-lit, in-focus images give the most reliable results",
     )
 
 with col2:
-    st.markdown("""
-        <div class="section-card">
-            <h3>✓ System capabilities</h3>
-            <div class="class-list">
-    """, unsafe_allow_html=True)
-
-    for cls in CLASS_NAMES:
-        st.markdown(f'<span class="class-pill">{cls}</span>', unsafe_allow_html=True)
-
-    st.markdown('</div></div>', unsafe_allow_html=True)
+    pills = "".join(f'<span class="class-pill">{c}</span>' for c in CLASS_NAMES)
+    render_html(f"""
+    <div class="section-card">
+        <h3>✓ System capabilities</h3>
+        <div class="class-list">{pills}</div>
+    </div>
+    """)
 
 st.divider()
 
+
 # ==================== ANALYSIS SECTION ====================
+GENERAL_ADVICE = (
+    "Seek medical care sooner if there is fever, spreading redness, pain, pus, "
+    "or rapid change in the skin."
+)
+
+GUIDANCE = {
+    "Eczema": "The image pattern resembles eczema. A clinician can confirm the type and advise on suitable care.",
+    "Fungal": "The image pattern resembles a fungal skin infection. Confirmation usually needs a clinical examination and sometimes a lab test.",
+    "Scabies": "The image pattern resembles scabies, which is contagious. See a clinician promptly, since close contacts may also need assessment.",
+    "Dermatitis": "The image pattern resembles dermatitis. A clinician can identify the cause and advise on care.",
+    "Others": "The image did not match a specific listed condition. This is not a sign that nothing is wrong. Please have it checked by a clinician.",
+}
+
 if uploaded_file is not None:
-    col1, col2 = st.columns([1, 1], gap="large")
-    
-    with col1:
-        st.markdown("""
-            <div class="section-box">
-                <h2>🖼️ Uploaded Image</h2>
-            </div>
-        """, unsafe_allow_html=True)
-        
-        image = Image.open(uploaded_file)
-        st.markdown('<div class="image-preview-container">', unsafe_allow_html=True)
-        st.image(image, width="stretch")
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-        # Image info
-        st.write(f"**File Name:** {uploaded_file.name}")
-        st.write(f"**File Size:** {uploaded_file.size / 1024:.2f} KB")
-        st.write(f"**Image Size:** {image.size[0]} × {image.size[1]} px")
-    
-    with col2:
-        st.markdown("""
-            <div class="section-box">
-                <h2>🔬 Analysis Progress</h2>
-            </div>
-        """, unsafe_allow_html=True)
-        
-        # Progress bar
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        # Save and analyze using a temporary file in the project folder
-        temp_file = tempfile.NamedTemporaryFile(suffix=".jpg", dir=str(TEMP_DIR), delete=False)
-        temp_file.close()
-        temp_path = temp_file.name
-        image.save(temp_path)
-        
+    try:
+        image = ImageOps.exif_transpose(Image.open(uploaded_file)).convert("RGB")
+    except Exception as e:
+        st.error(f"❌ Could not read this image: {e}")
+        st.stop()
+
+    left, right = st.columns([1, 1], gap="large")
+
+    with left:
+        render_html('<div class="section-card"><h3>🖼️ Uploaded image</h3></div>')
+        show_image(image)
+        st.write(f"**File name:** {uploaded_file.name}")
+        st.write(f"**File size:** {uploaded_file.size / 1024:.2f} KB")
+        st.write(f"**Image size:** {image.size[0]} × {image.size[1]} px")
+
+    with right:
+        render_html('<div class="section-card"><h3>🔬 Analysis</h3></div>')
+
         try:
-            status_text.write("⏳ **Initializing analysis...**")
-            progress_bar.progress(25)
-            
-            status_text.write("🔍 **Processing image...**")
-            progress_bar.progress(50)
-            
-            prediction, confidence = predict_image(temp_path, model)
-            
-            status_text.write("✓ **Analysis complete!**")
-            progress_bar.progress(100)
-            
-            # Display detailed results
-            st.divider()
-            st.markdown("""
-                <div class="result-box-success">
-                    <h2>🩺 DIAGNOSIS RESULT</h2>
-                    <div class="diagnosis-name">{}</div>
-                    <div class="confidence-score">
-                        Confidence: <strong>{:.2f}%</strong>
-                        <div class="confidence-bar">
-                            <div class="confidence-fill" style="width: {}%"></div>
-                        </div>
-                    </div>
-                </div>
-            """.format(prediction, confidence, confidence), unsafe_allow_html=True)
-            
-            # Risk Assessment
-            st.markdown("""
-                <div class="section-box">
-                    <h2>⚠️ Risk Assessment</h2>
-                </div>
-            """, unsafe_allow_html=True)
-            
+            with st.spinner("Analyzing image..."):
+                prediction, confidence = predict_image(image, model)
+
+            bar_width = max(0.0, min(confidence, 100.0))
+            render_html(f"""
+            <div class="result-box">
+                <div class="result-title">🩺 Screening result</div>
+                <div class="diagnosis-name">{prediction}</div>
+                <div class="confidence-score">Model confidence: <strong>{confidence:.2f}%</strong></div>
+                <div class="confidence-bar"><div class="confidence-fill" style="width: {bar_width:.1f}%"></div></div>
+            </div>
+            """)
+            render_html("""
+            <div class="result-disclaimer">
+                This is an automated screening result, not a diagnosis.
+                Only a qualified clinician can confirm a skin condition.
+            </div>
+            """)
+
+            # Risk assessment
+            st.markdown("#### ⚠️ Reliability")
             if confidence >= 85:
-                st.markdown("""
-                    <div class="alert-success">
-                        <strong>✓ HIGH CONFIDENCE RESULT</strong><br>
-                        The model shows strong confidence in this diagnosis.
-                    </div>
-                """, unsafe_allow_html=True)
+                level = "High"
+                render_html("""
+                <div class="alert-success">
+                    <strong>✓ HIGH MODEL CONFIDENCE</strong><br>
+                    The model scores this label highly. Confidence is not the same as certainty, so professional confirmation is still needed.
+                </div>
+                """)
             elif confidence >= 70:
-                st.markdown("""
-                    <div class="alert-warning">
-                        <strong>⚠ MODERATE CONFIDENCE</strong><br>
-                        Consider professional medical evaluation for confirmation.
-                    </div>
-                """, unsafe_allow_html=True)
+                level = "Moderate"
+                render_html("""
+                <div class="alert-warning">
+                    <strong>⚠ MODERATE CONFIDENCE</strong><br>
+                    Professional medical evaluation is recommended to confirm this result.
+                </div>
+                """)
             else:
-                st.markdown("""
-                    <div class="alert-warning">
-                        <strong>! LOW CONFIDENCE RESULT</strong><br>
-                        Please consult a dermatologist for accurate diagnosis.
-                    </div>
-                """, unsafe_allow_html=True)
-            
-            # Detailed Metrics
-            st.markdown("""
-                <div class="section-box">
-                    <h2>📊 Detailed Metrics</h2>
+                level = "Low"
+                render_html("""
+                <div class="alert-warning">
+                    <strong>! LOW CONFIDENCE RESULT</strong><br>
+                    Please consult a dermatologist. Try a clearer, better-lit image if you upload again.
                 </div>
-            """, unsafe_allow_html=True)
-            
-            metric_col1, metric_col2, metric_col3 = st.columns(3)
-            
-            with metric_col1:
-                st.markdown(f"""
+                """)
+
+            # Metrics
+            st.markdown("#### 📊 Detailed metrics")
+            m1, m2, m3 = st.columns(3)
+            for column, label, value in (
+                (m1, "Prediction", prediction),
+                (m2, "Confidence", f"{confidence:.1f}%"),
+                (m3, "Reliability", level),
+            ):
+                with column:
+                    render_html(f"""
                     <div class="metric-card">
-                        <div class="metric-card-label">Diagnosis</div>
-                        <div class="metric-card-value">{prediction}</div>
+                        <div class="metric-label">{label}</div>
+                        <div class="metric-value">{value}</div>
                     </div>
-                """, unsafe_allow_html=True)
-            
-            with metric_col2:
-                st.markdown(f"""
-                    <div class="metric-card">
-                        <div class="metric-card-label">Confidence</div>
-                        <div class="metric-card-value">{confidence:.1f}%</div>
-                    </div>
-                """, unsafe_allow_html=True)
-            
-            with metric_col3:
-                confidence_level = "High" if confidence >= 85 else "Moderate" if confidence >= 70 else "Low"
-                st.markdown(f"""
-                    <div class="metric-card">
-                        <div class="metric-card-label">Reliability</div>
-                        <div class="metric-card-value">{confidence_level}</div>
-                    </div>
-                """, unsafe_allow_html=True)
-            
-            # Recommendations
-            st.markdown("""
-                <div class="section-box">
-                    <h2>💡 Clinical Recommendations</h2>
-                </div>
-            """, unsafe_allow_html=True)
-            
-            recommendations = {
-                'Eczema': '• Recommend dermatology consultation\n• Consider patch testing\n• Evaluate for triggers\n• Review medications\n• Assess skin barrier function',
-                'Fungal': '• Fungal culture recommended\n• Topical antifungal therapy consideration\n• Hygiene assessment\n• Monitor treatment response\n• Check for secondary infections',
-                'Scabies': '• Recommend scrapings/dermoscopy confirmation\n• Treatment for patient and all close contacts\n• Environmental decontamination required\n• Close follow-up after 2 weeks\n• Educate on transmission prevention',
-                'Others': '• Consult dermatologist for accurate classification\n• Consider additional diagnostic tests\n• Document clinical findings and history\n• Plan follow-up care as advised\n• Consider dermoscopy if available'
-            }
-            
-            for rec in (recommendations.get(prediction, '• Consult dermatologist for confirmation\n• Consider additional diagnostic tests\n• Document clinical findings\n• Plan follow-up care')).split('\n'):
-                if rec.strip():
-                    st.write(rec)
-        
+                    """)
+
+            # General guidance
+            st.markdown("#### 💡 What to do next")
+            st.write(GUIDANCE.get(prediction, "Please consult a dermatologist for confirmation."))
+            st.write(GENERAL_ADVICE)
+
         except Exception as e:
-            st.markdown(f"""
-                <div class="alert-error">
-                    <strong>❌ Analysis Error</strong><br>
-                    {str(e)}
-                </div>
-            """, unsafe_allow_html=True)
-        
-        finally:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+            st.error(f"❌ Analysis error: {type(e).__name__}: {e}")
 
 else:
-    st.markdown("""
-        <div style="text-align: center; padding: 3rem; color: #999;">
-            <p style="font-size: 1.2rem;">👆 Upload an image to begin diagnosis</p>
-            <p style="font-size: 0.9rem;">Supported formats: JPG, JPEG, PNG, GIF</p>
-        </div>
-    """, unsafe_allow_html=True)
+    render_html("""
+    <div style="text-align: center; padding: 3rem; color: #999;">
+        <p style="font-size: 1.2rem;">👆 Upload an image to begin</p>
+        <p style="font-size: 0.9rem;">Supported formats: JPG, JPEG, PNG, GIF</p>
+    </div>
+    """)
+
 
 # ==================== FOOTER ====================
 st.divider()
-st.markdown("""
-    <div class="medical-footer">
-        <p><strong>Skin Disease Diagnosis</strong> - Advanced Dermatological Analysis System</p>
-        <p>Powered by Artificial Intelligence & PASSION Dataset</p>
-        <div class="footer-disclaimer">
-            <strong>⚠️ MEDICAL DISCLAIMER</strong><br>
-            This application is designed for educational and preliminary screening purposes only. 
-            It should NOT be used as a substitute for professional medical advice, diagnosis, or treatment. 
-            Always consult a qualified dermatologist or healthcare provider for accurate diagnosis and treatment. 
-            The creators assume no liability for outcomes resulting from the use of this system.
-        </div>
+render_html("""
+<div class="medical-footer">
+    <p><strong>Skin Disease Diagnosis</strong> - AI-Assisted Dermatological Screening</p>
+    <p>Powered by Artificial Intelligence and the PASSION Dataset</p>
+    <div class="footer-disclaimer">
+        <strong>⚠️ MEDICAL DISCLAIMER</strong><br>
+        This application is designed for educational and preliminary screening purposes only.
+        It should NOT be used as a substitute for professional medical advice, diagnosis, or treatment.
+        Always consult a qualified dermatologist or healthcare provider for accurate diagnosis and treatment.
+        The creators assume no liability for outcomes resulting from the use of this system.
     </div>
-""", unsafe_allow_html=True)
+</div>
+""")
