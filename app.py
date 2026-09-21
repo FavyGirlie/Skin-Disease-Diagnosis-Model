@@ -1,4 +1,7 @@
+import html
+import io
 import traceback
+from urllib.parse import quote_plus
 
 import streamlit as st
 from PIL import Image, ImageOps
@@ -182,6 +185,34 @@ st.markdown("""
         font-size: 0.9rem;
         margin-bottom: 0.9rem;
     }
+    .referral-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.6rem;
+        margin: 0.5rem 0 0.6rem 0;
+    }
+    .hospital-card {
+        background: white;
+        border: 1px solid #dfe8f6;
+        border-left: 5px solid #2d72d8;
+        border-radius: 12px;
+        padding: 0.75rem 1rem;
+        box-shadow: 0 3px 10px rgba(10, 48, 102, 0.05);
+    }
+    .hospital-name {
+        font-weight: 700;
+        color: #133d6e;
+        margin-bottom: 0.3rem;
+    }
+    .map-link {
+        font-size: 0.9rem;
+        color: #1c6fd1;
+        text-decoration: none;
+        font-weight: 600;
+    }
+    .map-link:hover {
+        text-decoration: underline;
+    }
     .medical-footer {
         text-align: center;
         color: #5b6b83;
@@ -218,6 +249,14 @@ except Exception as e:
     st.stop()
 
 
+# Prediction is cached per image so that changing the state dropdown (which
+# reruns the script) does not run the model again.
+@st.cache_data(show_spinner=False, max_entries=32)
+def run_prediction(image_bytes: bytes):
+    img = ImageOps.exif_transpose(Image.open(io.BytesIO(image_bytes))).convert("RGB")
+    return predict_image(img, model)
+
+
 # ==================== HEADER ====================
 render_html("""
 <div class="hero-card">
@@ -241,7 +280,8 @@ with st.sidebar:
     st.write("1. Upload a clear, well-lit image")
     st.write("2. Wait for analysis")
     st.write("3. Review the result")
-    st.write("4. Consult a professional")
+    st.write("4. Select your state to see suggested hospitals")
+    st.write("5. Consult a dermatology professional")
 
 
 # ==================== MAIN CONTENT ====================
@@ -270,6 +310,59 @@ with col2:
     """)
 
 st.divider()
+
+
+# ==================== REFERRAL DATA ====================
+HOSPITALS_BY_STATE = {
+    "Abia": ["Abia State University Teaching Hospital", "Federal Medical Centre Umuahia"],
+    "Adamawa": ["Federal Medical Centre Yola", "Specialist Hospital Yola"],
+    "Akwa Ibom": ["University of Uyo Teaching Hospital", "Ibom Specialist Hospital"],
+    "Anambra": ["Nnamdi Azikiwe University Teaching Hospital", "Chukwuemeka Odumegwu Ojukwu University Teaching Hospital"],
+    "Bauchi": ["Abubakar Tafawa Balewa University Teaching Hospital", "Specialist Hospital Bauchi"],
+    "Bayelsa": ["Niger Delta University Teaching Hospital", "Federal Medical Centre Yenagoa"],
+    "Benue": ["Benue State University Teaching Hospital", "Federal Medical Centre Makurdi"],
+    "Borno": ["University of Maiduguri Teaching Hospital", "State Specialist Hospital Maiduguri"],
+    "Cross River": ["University of Calabar Teaching Hospital", "General Hospital Calabar"],
+    "Delta": ["Delta State University Teaching Hospital", "Central Hospital Warri"],
+    "Ebonyi": ["Alex Ekwueme Federal University Teaching Hospital", "David Umahi Federal University Teaching Hospital"],
+    "Edo": ["University of Benin Teaching Hospital", "Irrua Specialist Teaching Hospital"],
+    "Ekiti": ["Federal Teaching Hospital Ido-Ekiti", "Ekiti State University Teaching Hospital"],
+    "Enugu": ["University of Nigeria Teaching Hospital", "Enugu State University Teaching Hospital"],
+    "FCT Abuja": ["University of Abuja Teaching Hospital", "Supreme Dermatology and Specialist Hospital"],
+    "Gombe": ["Federal Teaching Hospital Gombe", "Specialist Hospital Gombe"],
+    "Imo": ["Imo State University Teaching Hospital", "Federal Medical Centre Owerri"],
+    "Jigawa": ["Federal Medical Centre Birnin Kudu", "Rasheed Shekoni Teaching Hospital"],
+    "Kaduna": ["Ahmadu Bello University Teaching Hospital", "Barau Dikko Teaching Hospital"],
+    "Kano": ["Aminu Kano Teaching Hospital", "Murtala Mohammed Specialist Hospital"],
+    "Katsina": ["Federal Medical Centre Katsina", "General Amadi Rimi Specialist Hospital"],
+    "Kebbi": ["Federal Teaching Hospital Birnin Kebbi", "Sir Yahaya Memorial Hospital"],
+    "Kogi": ["Federal Medical Centre Lokoja", "Kogi State Specialist Hospital"],
+    "Kwara": ["University of Ilorin Teaching Hospital", "Sobi Specialist Hospital"],
+    "Lagos": ["Lagos University Teaching Hospital", "Lagos State University Teaching Hospital (LASUTH)"],
+    "Nasarawa": ["Dalhatu Araf Specialist Hospital", "Federal University Teaching Hospital Lafia"],
+    "Niger": ["General Hospital Minna", "Ibrahim Badamasi Babangida Specialist Hospital"],
+    "Ogun": ["Olabisi Onabanjo University Teaching Hospital", "Federal Medical Centre Abeokuta"],
+    "Ondo": ["University of Medical Sciences Teaching Hospital", "Federal Medical Centre Owo"],
+    "Osun": ["Obafemi Awolowo University Teaching Hospitals Complex", "LAUTECH Teaching Hospital"],
+    "Oyo": ["University College Hospital", "Bowen University Teaching Hospital"],
+    "Plateau": ["Jos University Teaching Hospital", "Plateau Specialist Hospital"],
+    "Rivers": ["University of Port Harcourt Teaching Hospital", "Rivers State University Teaching Hospital"],
+    "Sokoto": ["Usmanu Danfodiyo University Teaching Hospital", "Specialist Hospital Sokoto"],
+    "Taraba": ["Federal Medical Centre Jalingo", "Specialist Hospital Jalingo"],
+    "Yobe": ["Federal Medical Centre Nguru", "Yobe State Specialist Hospital"],
+    "Zamfara": ["Federal Medical Centre Gusau", "Yariman Bakura Specialist Hospital"],
+}
+
+
+def hospital_card(name: str, state: str) -> str:
+    query = quote_plus(f"{name}, {state}, Nigeria")
+    url = f"https://www.google.com/maps/search/?api=1&query={query}"
+    return (
+        '<div class="hospital-card">'
+        f'<div class="hospital-name">🏥 {html.escape(name)}</div>'
+        f'<a class="map-link" href="{url}" target="_blank" rel="noopener noreferrer">📍 Open in Google Maps</a>'
+        "</div>"
+    )
 
 
 # ==================== ANALYSIS SECTION ====================
@@ -307,7 +400,7 @@ if uploaded_file is not None:
 
         try:
             with st.spinner("Analyzing image..."):
-                prediction, confidence = predict_image(image, model)
+                prediction, confidence = run_prediction(uploaded_file.getvalue())
 
             bar_width = max(0.0, min(confidence, 100.0))
             render_html(f"""
@@ -372,6 +465,26 @@ if uploaded_file is not None:
             st.markdown("#### 💡 What to do next")
             st.write(GUIDANCE.get(prediction, "Please consult a dermatologist for confirmation."))
             st.write(GENERAL_ADVICE)
+
+            # Referral to a dermatology facility by state
+            st.markdown("#### 🏥 Find a dermatology clinic")
+            state = st.selectbox(
+                "Select your state or region in Nigeria",
+                options=sorted(HOSPITALS_BY_STATE),
+                index=None,
+                placeholder="Choose your state",
+                key="referral_state",
+            )
+            if state is None:
+                st.caption("Select your state to see suggested hospitals for a dermatology review.")
+            else:
+                cards = "".join(hospital_card(name, state) for name in HOSPITALS_BY_STATE[state])
+                st.write(f"Suggested facilities in **{state}**:")
+                render_html(f'<div class="referral-list">{cards}</div>')
+                st.caption(
+                    "Please call ahead to confirm that the hospital runs a dermatology clinic "
+                    "and on which days. In an emergency, go to the nearest hospital emergency unit."
+                )
 
         except Exception as e:
             st.error(f"❌ Analysis error: {type(e).__name__}: {e}")
