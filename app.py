@@ -6,7 +6,14 @@ from urllib.parse import quote_plus
 import streamlit as st
 from PIL import Image, ImageOps
 
-from predict import CLASS_NAMES, get_model_path, load_model, predict_image
+from predict import (
+    CLASS_NAMES,
+    MIN_CONFIDENCE,
+    Prediction,
+    get_model_path,
+    load_model,
+    predict_image,
+)
 
 # ==================== PAGE CONFIG ====================
 st.set_page_config(
@@ -159,7 +166,7 @@ st.markdown("""
         font-weight: 700;
         color: #133d6e;
     }
-    .alert-success, .alert-warning {
+    .alert-success, .alert-warning, .alert-error {
         border-radius: 14px;
         padding: 0.8rem 1rem;
         margin-top: 0.6rem;
@@ -175,6 +182,11 @@ st.markdown("""
         background: #fff8e8;
         color: #8a5a00;
         border: 1px solid #f3d08f;
+    }
+    .alert-error {
+        background: #fdeeee;
+        color: #8c1f1f;
+        border: 1px solid #f2b8b8;
     }
     .result-disclaimer {
         padding: 0.7rem 1rem;
@@ -250,9 +262,10 @@ except Exception as e:
 
 
 # Prediction is cached per image so that changing the state dropdown (which
-# reruns the script) does not run the model again.
+# reruns the script) does not run the model again. The result carries a status:
+# "ok", "not_skin" or "inconclusive".
 @st.cache_data(show_spinner=False, max_entries=32)
-def run_prediction(image_bytes: bytes):
+def run_prediction(image_bytes: bytes) -> Prediction:
     img = ImageOps.exif_transpose(Image.open(io.BytesIO(image_bytes))).convert("RGB")
     return predict_image(img, model)
 
@@ -261,7 +274,7 @@ def run_prediction(image_bytes: bytes):
 render_html("""
 <div class="hero-card">
     <h2>🏥 Skin Disease Diagnosis</h2>
-    <p>AI-assisted dermatological screening trained on the PASSION dataset.</p>
+    <p>AI-assisted dermatological screening trained on the PASSION dataset. Accepts photos of human skin only.</p>
 </div>
 """)
 
@@ -277,11 +290,15 @@ with st.sidebar:
         st.write(f"• {cls}")
     st.divider()
     st.subheader("Instructions")
-    st.write("1. Upload a clear, well-lit image")
+    st.write("1. Upload a clear, well-lit close-up photo of human skin")
     st.write("2. Wait for analysis")
     st.write("3. Review the result")
     st.write("4. Select your state to see suggested hospitals")
     st.write("5. Consult a dermatology professional")
+    st.caption(
+        "Documents, flyers, screenshots, objects and scenery are rejected "
+        "and are never given a diagnosis."
+    )
 
 
 # ==================== MAIN CONTENT ====================
@@ -291,17 +308,17 @@ with col1:
     render_html("""
     <div class="section-card">
         <h3>📤 Upload skin image</h3>
-        <p style="margin:0; color:#576b84;">Upload a clear image of a skin lesion for preliminary screening.</p>
+        <p style="margin:0; color:#576b84;">Upload a clear close-up photo of a skin area for preliminary screening.</p>
     </div>
     """)
     uploaded_file = st.file_uploader(
         "Select a dermatological image",
         type=["jpg", "jpeg", "png", "gif"],
-        help="Clear, well-lit, in-focus images give the most reliable results",
+        help="Clear, well-lit, in-focus photos of skin give the most reliable results",
     )
 
 with col2:
-    pills = "".join(f'<span class="class-pill">{c}</span>' for c in CLASS_NAMES)
+    pills = "".join(f'<span class="class-pill">{html.escape(c)}</span>' for c in CLASS_NAMES)
     render_html(f"""
     <div class="section-card">
         <h3>✓ System capabilities</h3>
@@ -365,7 +382,7 @@ def hospital_card(name: str, state: str) -> str:
     )
 
 
-# ==================== ANALYSIS SECTION ====================
+# ==================== RESULT RENDERING ====================
 GENERAL_ADVICE = (
     "Seek medical care sooner if there is fever, spreading redness, pain, pus, "
     "or rapid change in the skin."
@@ -379,6 +396,132 @@ GUIDANCE = {
     "Others": "The image did not match a specific listed condition. This is not a sign that nothing is wrong. Please have it checked by a clinician.",
 }
 
+
+def render_rejection(result: Prediction) -> None:
+    """Show why no diagnosis was made. No label, metrics or referral are shown."""
+    if result.status == "not_skin":
+        title = "🚫 NOT A SKIN IMAGE"
+        css_class = "alert-error"
+    else:
+        title = "⚠ INCONCLUSIVE RESULT"
+        css_class = "alert-warning"
+
+    body = html.escape(result.message).replace("\n\n", "<br><br>").replace("\n", "<br>")
+    render_html(f"""
+    <div class="{css_class}">
+        <strong>{title}</strong><br>
+        {body}
+    </div>
+    """)
+    render_html("""
+    <div class="result-disclaimer">
+        No diagnosis has been made. If you are worried about your skin,
+        please see a qualified clinician.
+    </div>
+    """)
+
+    with st.expander("Technical details"):
+        if result.checks:
+            st.write("Image checks:")
+            st.json({k: round(v, 3) for k, v in result.checks.items()})
+        if result.status == "inconclusive":
+            st.write(
+                f"The top probability was {result.confidence:.1f}%, below the "
+                f"{MIN_CONFIDENCE:.0f}% minimum needed to show a result."
+            )
+
+
+def render_result(result: Prediction) -> None:
+    prediction = result.label
+    confidence = result.confidence
+    safe_prediction = html.escape(prediction)
+
+    bar_width = max(0.0, min(confidence, 100.0))
+    render_html(f"""
+    <div class="result-box">
+        <div class="result-title">🩺 Screening result</div>
+        <div class="diagnosis-name">{safe_prediction}</div>
+        <div class="confidence-score">Model confidence: <strong>{confidence:.2f}%</strong></div>
+        <div class="confidence-bar"><div class="confidence-fill" style="width: {bar_width:.1f}%"></div></div>
+    </div>
+    """)
+    render_html("""
+    <div class="result-disclaimer">
+        This is an automated screening result, not a diagnosis.
+        Only a qualified clinician can confirm a skin condition.
+    </div>
+    """)
+
+    # Risk assessment
+    st.markdown("#### ⚠️ Reliability")
+    if confidence >= 85:
+        level = "High"
+        render_html("""
+        <div class="alert-success">
+            <strong>✓ HIGH MODEL CONFIDENCE</strong><br>
+            The model scores this label highly. Confidence is not the same as certainty, so professional confirmation is still needed.
+        </div>
+        """)
+    elif confidence >= 70:
+        level = "Moderate"
+        render_html("""
+        <div class="alert-warning">
+            <strong>⚠ MODERATE CONFIDENCE</strong><br>
+            Professional medical evaluation is recommended to confirm this result.
+        </div>
+        """)
+    else:
+        level = "Low"
+        render_html("""
+        <div class="alert-warning">
+            <strong>! LOW CONFIDENCE RESULT</strong><br>
+            Please consult a dermatologist. Try a clearer, better-lit image if you upload again.
+        </div>
+        """)
+
+    # Metrics
+    st.markdown("#### 📊 Detailed metrics")
+    m1, m2, m3 = st.columns(3)
+    for column, label, value in (
+        (m1, "Prediction", safe_prediction),
+        (m2, "Confidence", f"{confidence:.1f}%"),
+        (m3, "Reliability", level),
+    ):
+        with column:
+            render_html(f"""
+            <div class="metric-card">
+                <div class="metric-label">{label}</div>
+                <div class="metric-value">{value}</div>
+            </div>
+            """)
+
+    # General guidance
+    st.markdown("#### 💡 What to do next")
+    st.write(GUIDANCE.get(prediction, "Please consult a dermatologist for confirmation."))
+    st.write(GENERAL_ADVICE)
+
+    # Referral to a dermatology facility by state
+    st.markdown("#### 🏥 Find a dermatology clinic")
+    state = st.selectbox(
+        "Select your state or region in Nigeria",
+        options=sorted(HOSPITALS_BY_STATE),
+        index=None,
+        placeholder="Choose your state",
+        key="referral_state",
+    )
+    if state is None:
+        st.caption("Select your state to see suggested hospitals for a dermatology review.")
+    else:
+        cards = "".join(hospital_card(name, state) for name in HOSPITALS_BY_STATE[state])
+        st.write(f"Suggested facilities in **{state}**:")
+        render_html(f'<div class="referral-list">{cards}</div>')
+        st.caption(
+            "Please call ahead to confirm that the hospital runs a dermatology clinic "
+            "and on which days. In an emergency, go to the nearest hospital emergency unit."
+        )
+
+
+# ==================== ANALYSIS SECTION ====================
 if uploaded_file is not None:
     try:
         image = ImageOps.exif_transpose(Image.open(uploaded_file)).convert("RGB")
@@ -400,91 +543,12 @@ if uploaded_file is not None:
 
         try:
             with st.spinner("Analyzing image..."):
-                prediction, confidence = run_prediction(uploaded_file.getvalue())
+                result = run_prediction(uploaded_file.getvalue())
 
-            bar_width = max(0.0, min(confidence, 100.0))
-            render_html(f"""
-            <div class="result-box">
-                <div class="result-title">🩺 Screening result</div>
-                <div class="diagnosis-name">{prediction}</div>
-                <div class="confidence-score">Model confidence: <strong>{confidence:.2f}%</strong></div>
-                <div class="confidence-bar"><div class="confidence-fill" style="width: {bar_width:.1f}%"></div></div>
-            </div>
-            """)
-            render_html("""
-            <div class="result-disclaimer">
-                This is an automated screening result, not a diagnosis.
-                Only a qualified clinician can confirm a skin condition.
-            </div>
-            """)
-
-            # Risk assessment
-            st.markdown("#### ⚠️ Reliability")
-            if confidence >= 85:
-                level = "High"
-                render_html("""
-                <div class="alert-success">
-                    <strong>✓ HIGH MODEL CONFIDENCE</strong><br>
-                    The model scores this label highly. Confidence is not the same as certainty, so professional confirmation is still needed.
-                </div>
-                """)
-            elif confidence >= 70:
-                level = "Moderate"
-                render_html("""
-                <div class="alert-warning">
-                    <strong>⚠ MODERATE CONFIDENCE</strong><br>
-                    Professional medical evaluation is recommended to confirm this result.
-                </div>
-                """)
+            if result.accepted:
+                render_result(result)
             else:
-                level = "Low"
-                render_html("""
-                <div class="alert-warning">
-                    <strong>! LOW CONFIDENCE RESULT</strong><br>
-                    Please consult a dermatologist. Try a clearer, better-lit image if you upload again.
-                </div>
-                """)
-
-            # Metrics
-            st.markdown("#### 📊 Detailed metrics")
-            m1, m2, m3 = st.columns(3)
-            for column, label, value in (
-                (m1, "Prediction", prediction),
-                (m2, "Confidence", f"{confidence:.1f}%"),
-                (m3, "Reliability", level),
-            ):
-                with column:
-                    render_html(f"""
-                    <div class="metric-card">
-                        <div class="metric-label">{label}</div>
-                        <div class="metric-value">{value}</div>
-                    </div>
-                    """)
-
-            # General guidance
-            st.markdown("#### 💡 What to do next")
-            st.write(GUIDANCE.get(prediction, "Please consult a dermatologist for confirmation."))
-            st.write(GENERAL_ADVICE)
-
-            # Referral to a dermatology facility by state
-            st.markdown("#### 🏥 Find a dermatology clinic")
-            state = st.selectbox(
-                "Select your state or region in Nigeria",
-                options=sorted(HOSPITALS_BY_STATE),
-                index=None,
-                placeholder="Choose your state",
-                key="referral_state",
-            )
-            if state is None:
-                st.caption("Select your state to see suggested hospitals for a dermatology review.")
-            else:
-                cards = "".join(hospital_card(name, state) for name in HOSPITALS_BY_STATE[state])
-                st.write(f"Suggested facilities in **{state}**:")
-                render_html(f'<div class="referral-list">{cards}</div>')
-                st.caption(
-                    "Please call ahead to confirm that the hospital runs a dermatology clinic "
-                    "and on which days. In an emergency, go to the nearest hospital emergency unit."
-                )
+                render_rejection(result)
 
         except Exception as e:
             st.error(f"❌ Analysis error: {type(e).__name__}: {e}")
@@ -492,7 +556,7 @@ if uploaded_file is not None:
 else:
     render_html("""
     <div style="text-align: center; padding: 3rem; color: #999;">
-        <p style="font-size: 1.2rem;">👆 Upload an image to begin</p>
+        <p style="font-size: 1.2rem;">👆 Upload a skin image to begin</p>
         <p style="font-size: 0.9rem;">Supported formats: JPG, JPEG, PNG, GIF</p>
     </div>
     """)
